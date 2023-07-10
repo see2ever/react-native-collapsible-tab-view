@@ -5,16 +5,25 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native'
+import {
+  PanGestureHandler,
+  GestureHandlerRootView,
+  PanGestureHandlerGestureEvent,
+} from 'react-native-gesture-handler'
 import PagerView from 'react-native-pager-view'
 import Animated, {
   runOnJS,
   runOnUI,
+  Extrapolate,
+  interpolate,
   useAnimatedReaction,
   useAnimatedStyle,
   useDerivedValue,
   useSharedValue,
   withDelay,
   withTiming,
+  withDecay,
+  useAnimatedGestureHandler,
 } from 'react-native-reanimated'
 
 import { Context, TabNameContext } from './Context'
@@ -119,6 +128,7 @@ export const Container = React.memo(
       const oldAccScrollY: ContextType['oldAccScrollY'] = useSharedValue(0)
       const accDiffClamp: ContextType['accDiffClamp'] = useSharedValue(0)
       const scrollYCurrent: ContextType['scrollYCurrent'] = useSharedValue(0)
+      const isTopContainerSynced = useSharedValue(true)
       const scrollY: ContextType['scrollY'] = useSharedValue(
         tabNamesArray.map(() => 0)
       )
@@ -346,6 +356,63 @@ export const Container = React.memo(
         [onTabPress]
       )
 
+      const headerYCurrent = useSharedValue(0)
+
+      const gestureHandler = useAnimatedGestureHandler<
+        PanGestureHandlerGestureEvent,
+        { start: number }
+      >({
+        onStart: (_, ctx) => {
+          ctx.start = scrollY.value[index.value]
+        },
+        onActive: (event, ctx) => {
+          headerYCurrent.value = interpolate(
+            ctx.start - event.translationY,
+            [0, headerScrollDistance.value],
+            [0, headerScrollDistance.value],
+            Extrapolate.CLAMP
+          )
+        },
+        onEnd: (_) => {
+          headerYCurrent.value = withDecay(
+            {
+              velocity: -_.velocityY,
+              clamp: [0, headerScrollDistance.value],
+              deceleration: IS_IOS ? 0.998 : 0.99,
+            },
+            (finished) => {
+              isTopContainerSynced.value = finished || false
+            }
+          )
+        },
+      })
+
+      /* Syncs the scroll of the active tab once we complete the scroll gesture
+        on the header and the decay animation completes with success
+      */
+      useAnimatedReaction(
+        () => {
+          return isTopContainerSynced.value
+        },
+        (result) => {
+          if (!result) {
+            resyncTabScroll()
+          }
+        }
+      )
+
+      useAnimatedReaction(
+        () => headerYCurrent.value,
+        (y) => {
+          scrollY.value[index.value] = y
+          scrollYCurrent.value = y
+
+          for (const name of tabNamesArray) {
+            scrollToImpl(refMap[name], 0, y - contentInset.value, false)
+          }
+        }
+      )
+
       return (
         <Context.Provider
           value={{
@@ -389,22 +456,29 @@ export const Container = React.memo(
                 !cancelTranslation && stylez,
               ]}
             >
-              <View
-                style={[styles.container, styles.headerContainer]}
-                onLayout={getHeaderHeight}
-                pointerEvents="box-none"
-              >
-                {renderHeader &&
-                  renderHeader({
-                    containerRef,
-                    index,
-                    tabNames: tabNamesArray,
-                    focusedTab,
-                    indexDecimal,
-                    onTabPress,
-                    tabProps,
-                  })}
-              </View>
+              <GestureHandlerRootView>
+                <PanGestureHandler
+                  onGestureEvent={gestureHandler}
+                  hitSlop={{ left: -20 }}
+                >
+                  <Animated.View
+                    style={[styles.container, styles.headerContainer]}
+                    onLayout={getHeaderHeight}
+                    pointerEvents="box-none"
+                  >
+                    {renderHeader &&
+                      renderHeader({
+                        containerRef,
+                        index,
+                        tabNames: tabNamesArray,
+                        focusedTab,
+                        indexDecimal,
+                        onTabPress,
+                        tabProps,
+                      })}
+                  </Animated.View>
+                </PanGestureHandler>
+              </GestureHandlerRootView>
               <View
                 style={[styles.container, styles.tabBarContainer]}
                 onLayout={getTabBarHeight}
